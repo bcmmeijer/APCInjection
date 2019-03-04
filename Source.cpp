@@ -16,7 +16,7 @@ int main(int argc, const char * argv[]) {
 		HANDLE hProcessHandle = OpenProcess(PROCESS_VM_WRITE | PROCESS_VM_OPERATION, FALSE, dwProcID);
 		std::cout << "[+] Opened Process\n";
 		if (hProcessHandle != NULL) {
-			wchar_t buffer[] = L"C:\\Users\\Boudewijn\\Desktop\\theDLL64.dll";
+			wchar_t buffer[] = L"C:\\<Path to DLL>";
 			auto p = VirtualAllocEx(hProcessHandle, nullptr, sizeof(buffer) + 1, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
 			std::cout << "[+] Allocated Memory\n";
 			WriteProcessMemory(hProcessHandle, p, buffer, sizeof(buffer), nullptr);
