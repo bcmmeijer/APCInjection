@@ -1,66 +1,100 @@
 #include <iostream>
+#include <vector>
+
 #include <Windows.h>
 #include <TlHelp32.h>
-#include <vector>
-#include <fstream>
 
-bool FindProcess(const char * exeName, DWORD& pid, std::vector<DWORD>& TheadIDs);
+DWORD get_pid(const char* process) {
+	HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+	if (snapshot == INVALID_HANDLE_VALUE) 
+		return 0;
 
+	PROCESSENTRY32 pe;
+	pe.dwSize = sizeof(pe);
 
-int main(int argc, const char * argv[]) {
-
-	DWORD dwProcID;
-	std::vector<DWORD> TheadIDs;
-	if (FindProcess(argv[1], dwProcID, TheadIDs)) {
-		std::cout << "[*] ProcID of " << argv[1] << " is " << dwProcID <<std::endl;
-		HANDLE hProcessHandle = OpenProcess(PROCESS_VM_WRITE | PROCESS_VM_OPERATION, FALSE, dwProcID);
-		std::cout << "[+] Opened Process\n";
-		if (hProcessHandle != NULL) {
-			wchar_t buffer[] = L"C:\\<Path to DLL>";
-			auto p = VirtualAllocEx(hProcessHandle, nullptr, sizeof(buffer) + 1, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-			std::cout << "[+] Allocated Memory\n";
-			WriteProcessMemory(hProcessHandle, p, buffer, sizeof(buffer), nullptr);
-			std::cout << "[+] Written ProcMem\n";
-			std::cout << "[*] Looping through the threads and queueing APC...\n";
-			FARPROC LoadLibLocation = GetProcAddress(GetModuleHandle("kernel32"), "LoadLibraryW");
-			for (const auto& tid : TheadIDs) {
-				HANDLE hThread = OpenThread(THREAD_SET_CONTEXT, FALSE, tid);
-				if (hThread) {
-					QueueUserAPC((PAPCFUNC)LoadLibLocation, hThread, (ULONG_PTR)p);
-				}
-				CloseHandle(hThread);
-			}
-			VirtualFreeEx(hProcessHandle, p, 0, MEM_RELEASE | MEM_DECOMMIT);
-		}
-		std::cout << "[*] Cleaning up...\n";
-		CloseHandle(hProcessHandle);
+	if (!Process32First(snapshot, &pe)) {
+		CloseHandle(snapshot);
+		return 0;
 	}
+
+	DWORD pid = 0;
+	do {
+		if (!strcmp(pe.szExeFile, process)) {
+			pid = pe.th32ProcessID;
+			break;
+		}
+	} while (Process32Next(snapshot, &pe));
+
+	CloseHandle(snapshot);
+	return pid;
 }
 
+bool get_threads(DWORD pid, std::vector<DWORD>& outthreads) {
+	outthreads.clear();
 
-bool FindProcess(const char * exeName, DWORD& pid, std::vector<DWORD>& TheadIDs) {
-	auto hSnapshot = ::CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS | TH32CS_SNAPTHREAD, 0);
-	if (hSnapshot == INVALID_HANDLE_VALUE)
+	HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, pid);
+	if (snapshot == INVALID_HANDLE_VALUE) 
 		return false;
-	pid = 0;
-	PROCESSENTRY32 pe;
-	pe.dwSize = sizeof(PROCESSENTRY32);
-	if (::Process32First(hSnapshot, &pe)) {
-		do {
-			if (_strcmpi(pe.szExeFile, exeName) == 0) {
-				pid = pe.th32ProcessID;
-				THREADENTRY32 te = { sizeof(te) };
-				if (::Thread32First(hSnapshot, &te)) {
-					do {
-						if (te.th32OwnerProcessID == pid) {
-							TheadIDs.push_back(te.th32ThreadID);
-						}
-					} while (::Thread32Next(hSnapshot, &te));
-				}
-				break;
-			}
-		} while (::Process32Next(hSnapshot, &pe));
+
+	THREADENTRY32 te;
+	te.dwSize = sizeof(te);
+
+	if (!Thread32First(snapshot, &te)) {
+		CloseHandle(snapshot);
+		return false;
 	}
-	CloseHandle(hSnapshot);
-	return (pid > 0 && !TheadIDs.empty());
+
+	do {
+		outthreads.emplace_back(te.th32ThreadID);
+	} while (Thread32Next(snapshot, &te));
+
+	CloseHandle(snapshot);
+	return true;
+}
+
+int main(int argc, const char** argv) {
+	
+	if (argc < 3) return 1;
+
+	const char* process = argv[1];
+	const char* dllpath = argv[2];
+
+	DWORD pid = get_pid(process);
+	if (!pid) return 1;
+
+	std::vector<DWORD> threads;
+	if (!get_threads(pid, threads))
+		return 1;
+
+	HANDLE hproc = OpenProcess(PROCESS_VM_OPERATION, false, pid);
+	if (hproc == INVALID_HANDLE_VALUE)
+		return 1;
+
+	size_t dllpathlen = strlen(dllpath) + 1;
+	void* remote_buf = VirtualAllocEx(hproc, nullptr, dllpathlen, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+	if (!remote_buf) {
+		CloseHandle(hproc);
+		return 1;
+	}
+
+	if (!WriteProcessMemory(hproc, remote_buf, dllpath, dllpathlen, nullptr)) {
+		VirtualFreeEx(hproc, remote_buf, 0, MEM_RELEASE | MEM_FREE);
+		CloseHandle(hproc);
+		return 1;
+	}
+
+	for (auto& tid : threads) {
+
+		HANDLE hthread = OpenThread(THREAD_SET_CONTEXT, false, tid);
+		if (!hthread) {
+			VirtualFreeEx(hproc, remote_buf, 0, MEM_RELEASE | MEM_FREE);
+			CloseHandle(hproc);
+			return 1;
+		}
+
+		QueueUserAPC((PAPCFUNC)LoadLibraryA, hthread, (ULONG_PTR)remote_buf);
+		CloseHandle(hthread);
+	}
+	
+	return 0;
 }
