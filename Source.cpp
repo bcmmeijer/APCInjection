@@ -86,15 +86,13 @@ int main(int argc, const char** argv) {
 	for (auto& tid : threads) {
 
 		HANDLE hthread = OpenThread(THREAD_SET_CONTEXT, false, tid);
-		if (!hthread) {
-			VirtualFreeEx(hproc, remote_buf, 0, MEM_RELEASE | MEM_FREE);
-			CloseHandle(hproc);
-			return 1;
-		}
+		if (!hthread) continue;
 
 		QueueUserAPC((PAPCFUNC)LoadLibraryA, hthread, (ULONG_PTR)remote_buf);
 		CloseHandle(hthread);
 	}
 	
+	CloseHandle(hproc);
+
 	return 0;
 }
